@@ -1,7 +1,6 @@
 package BlueAbyss
 
 import (
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -9,34 +8,32 @@ import (
 
 type Pool struct {
 	capacity int32
-
-	runningWorker int32
-
-	wq workers
-
-	state int32
-
-	lock sync.Locker
-
-	cache sync.Pool
-
-	opts *Options
+	running  int32
+	blocking int
+	wq       workers
+	state    int32
+	lock     sync.Locker
+	cache    sync.Pool
+	opts     *Options
 }
 
 func NewPool(size int, options ...option) (*Pool, error) {
 	opts := loadOptions(options...)
-
 	if size <= 0 {
 		size = DefaultAbyssSize
 	}
+	if opts.BackupWqSize <= 0 {
+		opts.BackupWqSize = int32(size)
+	}
 
 	p := &Pool{
-		capacity:      int32(size),
-		runningWorker: int32(0),
-		wq:            newWorkQueue(size),
-		state:         Abyss_OPENED,
-		lock:          &sync.Mutex{},
-		opts:          opts,
+		capacity: int32(size),
+		running:  int32(0),
+		blocking: 0,
+		wq:       newWorkQueue(size),
+		state:    Abyss_OPENED,
+		lock:     &sync.Mutex{},
+		opts:     opts,
 	}
 
 	p.cache = sync.Pool{
@@ -48,11 +45,22 @@ func NewPool(size int, options ...option) (*Pool, error) {
 		},
 	}
 
-	go p.background()
+	expiryT := time.Now().Add(p.opts.ExpiryDuration)
+	if opts.PreAlloc {
+		for i := 0; i < p.Cap(); i++ {
+			w := p.cache.Get().(*worker)
+			w.expirytime = expiryT
+			w.run()
+			p.wq.insertWorker(w)
+		}
+	}
+
+	go p.expiredCollection()
+	go p.backupWorkerQueue()
 	return p, nil
 }
 
-func (p *Pool) background() {
+func (p *Pool) expiredCollection() {
 	exp := p.opts.ExpiryDuration
 	heartBeat := time.NewTicker(exp)
 	defer heartBeat.Stop()
@@ -62,11 +70,45 @@ func (p *Pool) background() {
 			return
 		}
 
-		expirychan := p.wq.expiryChan()
+		expirychan := p.wq.expiredChan()
+		expirytime := time.Now().Add(p.opts.ExpiryDuration)
 		for w := range expirychan {
-			fmt.Println(w)
+			w.expirytime = expirytime
+			if ok := p.wq.insertWorker(w); !ok {
+				if p.wq.hasbackup() {
+					p.wq.insertWorkerBackup(w)
+				} else {
+					break
+				}
+			}
 		}
 	}
+}
+
+func (p *Pool) backupWorkerQueue() {
+	heartBeat := time.NewTicker(20 * time.Second)
+
+	for range heartBeat.C {
+		if p.closed() {
+			return
+		}
+
+		p.lock.Lock()
+		if !p.wq.hasbackup() && p.usageRate() >= p.opts.BackupRate {
+			// ready to set backup worker queue.
+			p.wq.backup(int(p.opts.BackupWqSize))
+			for i := 0; i < int(p.opts.BackupWqSize); i++ {
+				w := p.cache.Get().(*worker)
+				w.run()
+				p.wq.insertWorkerBackup(w)
+			}
+		}
+		p.lock.Unlock()
+	}
+}
+
+func (p *Pool) usageRate() float32 {
+	return float32(p.Busy()) / float32(p.Cap())
 }
 
 func (p *Pool) Summit(t func()) error {
@@ -88,7 +130,11 @@ func (p *Pool) Cap() int {
 
 // return the number of running goroutine.
 func (p *Pool) Busy() int {
-	return int(atomic.LoadInt32(&p.runningWorker))
+	return int(atomic.LoadInt32(&p.running))
+}
+
+func (p *Pool) Full() bool {
+	return p.Cap() == p.Busy()
 }
 
 func (p *Pool) Free() int {
@@ -100,11 +146,11 @@ func (p *Pool) closed() bool {
 }
 
 func (p *Pool) increaseWorker() {
-	atomic.AddInt32(&p.runningWorker, 1)
+	atomic.AddInt32(&p.running, 1)
 }
 
 func (p *Pool) decreaseWorker() {
-	atomic.AddInt32(&p.runningWorker, -1)
+	atomic.AddInt32(&p.running, -1)
 }
 
 // get a available worker from abyss to run the tasks.
@@ -115,18 +161,17 @@ func (p *Pool) getWorker() (w *worker) {
 	}
 
 	p.lock.Lock()
-	defer p.lock.Unlock()
 
 	w = p.wq.get()
 	if w != nil {
+		p.lock.Unlock()
 		return
-	} else if p.Free() > 0 {
+	} else if !p.Full() {
 		createNewWorker() // create a new worker, waiting for the task.
+		p.lock.Unlock()
 	} else {
 		// p.Free() == 0, workers are all at work.
-		if p.options.NonBlocking {
-			return
-		}
+
 	}
 	return
 }
@@ -138,9 +183,4 @@ func (p *Pool) putWorker(w *worker) {
 
 func (p *Pool) Release() {
 
-}
-
-func (p *Pool) _cache() {
-	w := p.cache.Get().(*worker)
-	w.run()
 }

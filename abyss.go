@@ -2,6 +2,7 @@ package BlueAbyss
 
 import (
 	"errors"
+	"time"
 )
 
 // pool state
@@ -15,7 +16,9 @@ const (
 
 // pool default configuration
 const (
-	DefaultAbyssSize = 100000
+	DefaultAbyssSize               = 100000
+	DefaultAbyssExpiryTime         = 3 * time.Minute
+	DefaultAbyssBackupRate float32 = 0.7
 )
 
 var (

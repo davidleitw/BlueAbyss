@@ -1,11 +1,14 @@
 package BlueAbyss
 
-import "time"
+import (
+	"log"
+	"time"
+)
 
 type worker struct {
-	owner       *Pool
-	taskQueue   chan func()
-	recycleTime time.Time
+	owner      *Pool
+	taskQueue  chan func()
+	expirytime time.Time
 }
 
 func (w *worker) run() {
@@ -14,6 +17,15 @@ func (w *worker) run() {
 		defer func() {
 			w.owner.decreaseWorker()
 			w.owner.cache.Put(w)
+
+			// recover from panic
+			if r := recover(); r != nil {
+				if w.owner.opts.PanicHandler != nil {
+					w.owner.opts.PanicHandler(r)
+				} else {
+					log.Println("worker panic: ", r)
+				}
+			}
 		}()
 
 		for work := range w.taskQueue {
@@ -21,8 +33,6 @@ func (w *worker) run() {
 				return
 			}
 			work()
-			// finish task
-			// let worker go back the pool
 			w.owner.putWorker(w)
 		}
 	}()

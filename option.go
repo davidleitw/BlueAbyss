@@ -4,10 +4,12 @@ import "time"
 
 type Options struct {
 	ExpiryDuration  time.Duration
-	UnlimitedSize   bool
 	PreAlloc        bool
 	MaxWorkerNumber int
 	NonBlocking     bool
+	PanicHandler    func(interface{})
+	BackupRate      float32
+	BackupWqSize    int32
 }
 
 type option func(opts *Options)
@@ -18,18 +20,18 @@ func loadOptions(options ...option) *Options {
 	for _, option := range options {
 		option(opts)
 	}
+	if opts.ExpiryDuration == 0 {
+		opts.ExpiryDuration = DefaultAbyssExpiryTime
+	}
+	if opts.BackupRate <= 0.0 {
+		opts.BackupRate = DefaultAbyssBackupRate
+	}
 	return opts
 }
 
 func SetUpExpiryDuration(expiry time.Duration) option {
 	return func(opts *Options) {
 		opts.ExpiryDuration = expiry
-	}
-}
-
-func SetUpUnlimitedSize(unlimited bool) option {
-	return func(opts *Options) {
-		opts.UnlimitedSize = unlimited
 	}
 }
 
@@ -45,8 +47,26 @@ func SetUpMaxWorkerNumber(maxWorkerNum int) option {
 	}
 }
 
-func SetUpNonBlocking(nonb bool) option {
+func SetUpNonBlocking(nonblock bool) option {
 	return func(opts *Options) {
-		opts.NonBlocking = nonb
+		opts.NonBlocking = nonblock
+	}
+}
+
+func SetUpPanicHandler(panicHandle func(interface{})) option {
+	return func(opts *Options) {
+		opts.PanicHandler = panicHandle
+	}
+}
+
+func SetUpBackupRate(rate float32) option {
+	return func(opts *Options) {
+		opts.BackupRate = rate
+	}
+}
+
+func SetUpBackupWqSize(size int32) option {
+	return func(opts *Options) {
+		opts.BackupWqSize = size
 	}
 }
